@@ -95,6 +95,7 @@ _declspec(align(4))
 #endif
 {
     PyObject *filename;
+    PyObject *funname;
     int lineno;
 } frame_t;
 
@@ -174,6 +175,11 @@ tracemalloc_error(const char *format, ...)
 
 static int tracemalloc_reentrant_key;
 
+static PyObject* self_key = NULL;
+static PyObject* class_str = NULL;
+static PyObject* classname_str = NULL;
+static PyObject* unknown_funname = NULL;
+static PyObject* delimiter = NULL; 
 /* Any non-NULL pointer can be used */
 #define REENTRANT Py_True
 
@@ -280,6 +286,9 @@ hashtable_compare_traceback(const traceback_t *traceback1,
 
         if (frame1->lineno != frame2->lineno)
             return 0;
+        
+        if (frame1->funname != frame2->funname)
+            return 0;
 
         if (frame1->filename != frame2->filename) {
             assert(STRING_COMPARE(frame1->filename, frame2->filename) != 0);
@@ -287,6 +296,72 @@ hashtable_compare_traceback(const traceback_t *traceback1,
         }
     }
     return 1;
+}
+
+static int
+get_funname(PyFrameObject *pyframe, char *funname)
+{
+    PyCodeObject* code;
+    PyObject* self;
+    PyObject* selfcls;
+    PyObject* clsname;
+    char* s;
+    Py_ssize_t len;
+
+    code = pyframe->f_code;
+    if (code->co_argcount == 0)
+        return 0;
+
+    if (PyTuple_GET_ITEM(code->co_varnames, 0) != self_key)
+        return 0;
+    
+    self = PyDict_GetItem(pyframe->f_locals, self_key);
+    if (self == NULL)
+        return 0;
+
+    selfcls = PyObject_GetAttr(self, class_str);
+    if (selfcls == NULL)
+        Py_DECREF(self);
+        return 0;
+
+    clsname = PyObject_GetAttr(selfcls, classname_str);
+    if (clsname == NULL)
+        Py_DECREF(self);
+        Py_DECREF(selfcls);
+        return 0;
+    
+    Py_DECREF(self);
+    Py_DECREF(selfcls);
+    Py_DECREF(clsname);
+    if (PyString_AsStringAndSize(clsname, &s, &len) < 0)
+        return 0;
+    
+    memcpy(funname, s, len);
+    funname[len] = '.';
+    funname += len;
+    PyString_AsStringAndSize(code->co_name, &s, &len);
+    memcpy(funname, s, len);
+    return 1;
+}
+
+static PyObject*
+tracemalloc_get_funname(PyFrameObject *pyframe) {
+    char funname[256];
+    PyObject* name;
+
+    if (!get_funname(pyframe, funname)) {
+        name = unknown_funname;
+        Py_INCREF(name);
+        return name;
+    }
+
+    name = PyString_FromString(funname);
+    if (name == NULL) {
+        name = unknown_funname;
+        Py_INCREF(name);
+        return name;
+    }
+    return name;
 }
 
 static void
@@ -347,7 +422,6 @@ tracemalloc_get_frame(PyFrameObject *pyframe, frame_t *frame)
         return;
     }
 #endif
-
     /* intern the filename */
     entry = _Py_hashtable_get_entry(tracemalloc_filenames, filename);
     if (entry != NULL) {
@@ -368,6 +442,7 @@ tracemalloc_get_frame(PyFrameObject *pyframe, frame_t *frame)
 
     /* the tracemalloc_filenames table keeps a reference to the filename */
     frame->filename = filename;
+    frame->funname = tracemalloc_get_funname(pyframe);
 }
 
 static Py_uhash_t
@@ -798,18 +873,30 @@ tracemalloc_init(void)
                                        _Py_hashtable_hash_ptr,
                                        _Py_hashtable_compare_direct);
 
+    if (self_key == NULL)
+        self_key = PyString_FromString("self");
+    if (class_str == NULL)
+        class_str = PyString_FromString("__class__");
+    if (classname_str == NULL)
+        classname_str = PyString_FromString("__name__");
+
     if (tracemalloc_filenames == NULL || tracemalloc_tracebacks == NULL
-        || tracemalloc_traces == NULL)
+        || tracemalloc_traces == NULL || self_key == NULL || class_str == NULL
+        || classname_str == NULL)
     {
         PyErr_NoMemory();
         return -1;
     }
 
     unknown_filename = STRING_FROMSTRING("<unknown>");
-    if (unknown_filename == NULL)
+    unknown_funname = STRING_FROMSTRING("<unknown>");
+    delimiter = STRING_FROMSTRING(":");
+    if (unknown_filename == NULL || unknown_funname == NULL
+        || delimiter == NULL)
         return -1;
     STRING_INTERN_IN_PLACE(&unknown_filename);
-
+    STRING_INTERN_IN_PLACE(&unknown_funname);
+    
     tracemalloc_empty_traceback.nframe = 1;
     /* borrowed reference */
     tracemalloc_empty_traceback.frames[0].filename = unknown_filename;
@@ -851,6 +938,8 @@ tracemalloc_deinit(void)
 #endif
 
     Py_XDECREF(unknown_filename);
+    Py_XDECREF(unknown_funname);
+    Py_XDECREF(delimiter);
 }
 
 static PyObject*
@@ -1026,7 +1115,7 @@ frame_to_pyobject(frame_t *frame)
 {
     PyObject *frame_obj, *lineno_obj;
 
-    frame_obj = PyTuple_New(2);
+    frame_obj = PyTuple_New(3);
     if (frame_obj == NULL)
         return NULL;
 
@@ -1041,8 +1130,11 @@ frame_to_pyobject(frame_t *frame)
         Py_DECREF(frame_obj);
         return NULL;
     }
-    PyTuple_SET_ITEM(frame_obj, 1, lineno_obj);
+    PyTuple_SET_ITEM(frame_obj, 2, lineno_obj);
 
+    Py_INCREF(frame->funname);
+    PyTuple_SET_ITEM(frame_obj, 1, frame->funname);
+    
     return frame_obj;
 }
 

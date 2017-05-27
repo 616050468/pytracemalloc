@@ -169,19 +169,22 @@ class Frame(object):
     """
     Frame of a traceback.
     """
-    __slots__ = ("_frame",)
+    __slots__ = ("_frame", "_filename")
 
     def __init__(self, frame):
-        # frame is a tuple: (filename: str, lineno: int)
+        # frame is a tuple: (filename: str, funname: str, lineno: int)
         self._frame = frame
+        self._filename = frame[0]
+        if frame[1] is not None:
+            self._filename = ':'.join((frame[0], frame[1]))
 
     @property
     def filename(self):
-        return self._frame[0]
+        return self._filename
 
     @property
     def lineno(self):
-        return self._frame[1]
+        return self._frame[2]
 
     def __eq__(self, other):
         return (self._frame == other._frame)
