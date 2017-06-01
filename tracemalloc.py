@@ -175,8 +175,10 @@ class Frame(object):
         # frame is a tuple: (filename: str, funname: str, lineno: int)
         self._frame = frame
         self._filename = frame[0]
-        if frame[1] is not None:
+        if frame[1] is not None and frame[1] != '<unknown>':
             self._filename = ':'.join((frame[0], frame[1]))
+		#print 'frame len:%s' % len(frame)
+		#print 'filename:%s, lineno:%s' % (frame[0], frame[2])
 
     @property
     def filename(self):

@@ -154,11 +154,11 @@ static void
 tracemalloc_error(const char *format, ...)
 {
     va_list ap;
-    fprintf(stderr, "tracemalloc: ");
+    f//printf(stderr, "tracemalloc: ");
     va_start(ap, format);
-    vfprintf(stderr, format, ap);
+    vf//printf(stderr, format, ap);
     va_end(ap);
-    fprintf(stderr, "\n");
+    f//printf(stderr, "\n");
     fflush(stderr);
 }
 #endif
@@ -302,45 +302,65 @@ static int
 get_funname(PyFrameObject *pyframe, char *funname)
 {
     PyCodeObject* code;
-    PyObject* self;
-    PyObject* selfcls;
-    PyObject* clsname;
+    PyObject* self = NULL;
+    PyObject* selfcls = NULL;
+    PyObject* clsname = NULL;
     char* s;
     Py_ssize_t len;
 
     code = pyframe->f_code;
-    if (code->co_argcount == 0)
-        return 0;
+    if (code->co_argcount == 0) {
+		//printf("co_argcount = 0\n");
+        goto final;
+	}
 
-    if (PyTuple_GET_ITEM(code->co_varnames, 0) != self_key)
-        return 0;
-    
-    self = PyDict_GetItem(pyframe->f_locals, self_key);
-    if (self == NULL)
-        return 0;
+	PyObject* first = PyTuple_GET_ITEM(code->co_varnames, 0);
+	if (first == NULL) {
+		goto final;
+	}
+	s = PyString_AsString(first);
+	//printf("co_nlocals: %d, %d\n", code->co_argcount, code->co_nlocals);
+	if (strcmp(s, "self") != 0) {
+		//printf("first name != self\n");
+		goto final;
+	}
+
+    self = pyframe->f_localsplus[0];
+    if (self == NULL) {
+		//printf("cant find self\n");
+        goto final;
+	}
 
     selfcls = PyObject_GetAttr(self, class_str);
-    if (selfcls == NULL)
-        Py_DECREF(self);
-        return 0;
+    if (selfcls == NULL) {
+		//printf("cant find selfcls\n");
+        goto final;
+	}
 
     clsname = PyObject_GetAttr(selfcls, classname_str);
     if (clsname == NULL)
-        Py_DECREF(self);
+	{
+		//printf("cant find clsname\n");
         Py_DECREF(selfcls);
-        return 0;
-    
-    Py_DECREF(self);
+        goto final;   
+	}
     Py_DECREF(selfcls);
     Py_DECREF(clsname);
-    if (PyString_AsStringAndSize(clsname, &s, &len) < 0)
-        return 0;
-    
-    memcpy(funname, s, len);
-    funname[len] = '.';
-    funname += len;
+
+final:
+	if (clsname != NULL &&
+			PyString_AsStringAndSize(clsname, &s, &len) != -1) {
+		//printf("clsname: %s\n", s);
+		memcpy(funname, s, len);
+		funname[len] = '.';
+		funname += len+1;
+	}
+    //printf("111111111111111111\n"); 
     PyString_AsStringAndSize(code->co_name, &s, &len);
     memcpy(funname, s, len);
+	funname[len] = '\0';
+	//printf("funname len=%d\n", strlen(funname));
+
     return 1;
 }
 
@@ -887,7 +907,6 @@ tracemalloc_init(void)
         PyErr_NoMemory();
         return -1;
     }
-
     unknown_filename = STRING_FROMSTRING("<unknown>");
     unknown_funname = STRING_FROMSTRING("<unknown>");
     delimiter = STRING_FROMSTRING(":");
@@ -939,6 +958,9 @@ tracemalloc_deinit(void)
 
     Py_XDECREF(unknown_filename);
     Py_XDECREF(unknown_funname);
+	Py_XDECREF(self_key);
+	Py_XDECREF(class_str);
+	Py_XDECREF(classname_str);
     Py_XDECREF(delimiter);
 }
 
@@ -1124,6 +1146,12 @@ frame_to_pyobject(frame_t *frame)
     Py_INCREF(frame->filename);
     PyTuple_SET_ITEM(frame_obj, 0, frame->filename);
 
+    Py_INCREF(frame->funname);
+	//printf("%s\n", PyString_AsString(frame->funname));
+
+    PyTuple_SET_ITEM(frame_obj, 1, frame->funname);
+    //PyTuple_SET_ITEM(frame_obj, 1, Py_None);
+
     assert(frame->lineno >= 0);
     lineno_obj = lineno_as_obj(frame->lineno);
     if (lineno_obj == NULL) {
@@ -1132,9 +1160,6 @@ frame_to_pyobject(frame_t *frame)
     }
     PyTuple_SET_ITEM(frame_obj, 2, lineno_obj);
 
-    Py_INCREF(frame->funname);
-    PyTuple_SET_ITEM(frame_obj, 1, frame->funname);
-    
     return frame_obj;
 }
 
