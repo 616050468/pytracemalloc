@@ -2,7 +2,7 @@ from collections import Sequence, Iterable
 import fnmatch
 import linecache
 import os.path
-import pickle
+import cPickle
 
 # Import types and functions implemented in C
 from _tracemalloc import *
@@ -172,13 +172,14 @@ class Frame(object):
     __slots__ = ("_frame", "_filename")
 
     def __init__(self, frame):
-        # frame is a tuple: (filename: str, funname: str, lineno: int)
+        # frame is a tuple: (filename: str, clsname: str, funname: str, lineno: int)
         self._frame = frame
-        self._filename = frame[0]
-        if frame[1] is not None and frame[1] != '<unknown>':
-            self._filename = ':'.join((frame[0], frame[1]))
-		#print 'frame len:%s' % len(frame)
-		#print 'filename:%s, lineno:%s' % (frame[0], frame[2])
+        if frame[1] is not None:
+            self._filename = ':'.join((frame[0], '.'.join((frame[1], frame[2]))))
+        elif frame[2] is not None:
+            self._filename = ':'.join((frame[0], frame[2]))
+        else:
+            self._filename = frame[0]
 
     @property
     def filename(self):
@@ -186,7 +187,7 @@ class Frame(object):
 
     @property
     def lineno(self):
-        return self._frame[2]
+        return self._frame[3]
 
     def __eq__(self, other):
         return (self._frame == other._frame)
@@ -390,7 +391,7 @@ class Snapshot(object):
         Write the snapshot into a file.
         """
         with open(filename, "wb") as fp:
-            pickle.dump(self, fp, pickle.HIGHEST_PROTOCOL)
+            cPickle.dump(self, fp, cPickle.HIGHEST_PROTOCOL)
 
     @staticmethod
     def load(filename):
@@ -398,7 +399,7 @@ class Snapshot(object):
         Load a snapshot from a file.
         """
         with open(filename, "rb") as fp:
-            return pickle.load(fp)
+            return cPickle.load(fp)
 
     def _filter_trace(self, include_filters, exclude_filters, trace):
         traceback = trace[1]
@@ -450,6 +451,7 @@ class Snapshot(object):
             for trace in self.traces._traces:
                 size, trace_traceback = trace
                 try:
+                    print trace_traceback
                     traceback = tracebacks[trace_traceback]
                 except KeyError:
                     if key_type == 'traceback':
@@ -457,7 +459,7 @@ class Snapshot(object):
                     elif key_type == 'lineno':
                         frames = trace_traceback[:1]
                     else: # key_type == 'filename':
-                        frames = ((trace_traceback[0][0], 0),)
+                        frames = ((trace_traceback[0][0], None, None, 0),)
                     traceback = Traceback(frames)
                     tracebacks[trace_traceback] = traceback
                 try:
@@ -477,7 +479,7 @@ class Snapshot(object):
                         if key_type == 'lineno':
                             frames = (frame,)
                         else: # key_type == 'filename':
-                            frames = ((frame[0], 0),)
+                            frames = ((frame[0], None, None, 0),)
                         traceback = Traceback(frames)
                         tracebacks[frame] = traceback
                     try:

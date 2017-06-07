@@ -95,6 +95,7 @@ _declspec(align(4))
 #endif
 {
     PyObject *filename;
+	PyObject *clsname;
     PyObject *funname;
     int lineno;
 } frame_t;
@@ -287,6 +288,9 @@ hashtable_compare_traceback(const traceback_t *traceback1,
         if (frame1->lineno != frame2->lineno)
             return 0;
         
+		if (frame1->clsname != frame2->clsname)
+			return 0;
+
         if (frame1->funname != frame2->funname)
             return 0;
 
@@ -298,15 +302,43 @@ hashtable_compare_traceback(const traceback_t *traceback1,
     return 1;
 }
 
-static int
-get_funname(PyFrameObject *pyframe, char *funname)
+static PyObject*
+get_obj_from_cache(PyObject* obj)
+{
+    _Py_hashtable_entry_t *entry;
+	PyObject *name;
+
+	if (obj == NULL)
+		return obj;
+
+	name = obj;
+    entry = _Py_hashtable_get_entry(tracemalloc_filenames, obj);
+    if (entry != NULL) {
+        name = (PyObject *)entry->key;
+    }
+    else {
+        /* tracemalloc_filenames is responsible to keep a reference
+           to the filename */
+		Py_INCREF(obj);
+        if (_Py_hashtable_set(tracemalloc_filenames, obj, NULL, 0) < 0) {
+            Py_DECREF(obj);
+#ifdef TRACE_DEBUG
+            tracemalloc_error("failed to intern the filename");
+#endif
+			name = NULL;
+        }
+    }
+    return name;	
+}
+
+static void
+tracemalloc_get_funname(PyFrameObject *pyframe, frame_t *frame)
 {
     PyCodeObject* code;
     PyObject* self = NULL;
     PyObject* selfcls = NULL;
     PyObject* clsname = NULL;
-    char* s;
-    Py_ssize_t len;
+	char* s;
 
     code = pyframe->f_code;
     if (code->co_argcount == 0) {
@@ -330,8 +362,14 @@ get_funname(PyFrameObject *pyframe, char *funname)
 		//printf("cant find self\n");
         goto final;
 	}
-
+	//s = PyString_AsString(frame->filename);
+	//printf("filename: %s:%d\n", s, frame->lineno);
+	//s = PyString_AsString(code->co_name);
+	//printf("get selfcls: %s\n", s);
+	//fflush(stdout);
     selfcls = PyObject_GetAttr(self, class_str);
+	//printf("get attr....\n");
+	//fflush(stdout);
     if (selfcls == NULL) {
 		//printf("cant find selfcls\n");
         goto final;
@@ -340,48 +378,18 @@ get_funname(PyFrameObject *pyframe, char *funname)
     clsname = PyObject_GetAttr(selfcls, classname_str);
     if (clsname == NULL)
 	{
-		//printf("cant find clsname\n");
         Py_DECREF(selfcls);
         goto final;   
 	}
+	//printf("decref selfcls and clsname\n");
     Py_DECREF(selfcls);
     Py_DECREF(clsname);
+	//printf("decref ok\n");
 
 final:
-	if (clsname != NULL &&
-			PyString_AsStringAndSize(clsname, &s, &len) != -1) {
-		//printf("clsname: %s\n", s);
-		memcpy(funname, s, len);
-		funname[len] = '.';
-		funname += len+1;
-	}
-    //printf("111111111111111111\n"); 
-    PyString_AsStringAndSize(code->co_name, &s, &len);
-    memcpy(funname, s, len);
-	funname[len] = '\0';
-	//printf("funname len=%d\n", strlen(funname));
-
-    return 1;
-}
-
-static PyObject*
-tracemalloc_get_funname(PyFrameObject *pyframe) {
-    char funname[256];
-    PyObject* name;
-
-    if (!get_funname(pyframe, funname)) {
-        name = unknown_funname;
-        Py_INCREF(name);
-        return name;
-    }
-
-    name = PyString_FromString(funname);
-    if (name == NULL) {
-        name = unknown_funname;
-        Py_INCREF(name);
-        return name;
-    }
-    return name;
+    //printf("set clsname and funname\n"); 
+	frame->clsname = clsname; //get_obj_from_cache(clsname);
+	frame->funname = code->co_name; //get_obj_from_cache(code->co_name);
 }
 
 static void
@@ -443,6 +451,7 @@ tracemalloc_get_frame(PyFrameObject *pyframe, frame_t *frame)
     }
 #endif
     /* intern the filename */
+
     entry = _Py_hashtable_get_entry(tracemalloc_filenames, filename);
     if (entry != NULL) {
         filename = (PyObject *)entry->key;
@@ -459,10 +468,9 @@ tracemalloc_get_frame(PyFrameObject *pyframe, frame_t *frame)
             return;
         }
     }
-
     /* the tracemalloc_filenames table keeps a reference to the filename */
     frame->filename = filename;
-    frame->funname = tracemalloc_get_funname(pyframe);
+	tracemalloc_get_funname(pyframe, frame);
 }
 
 static Py_uhash_t
@@ -518,6 +526,21 @@ traceback_get_frames(traceback_t *traceback)
     }
 }
 
+static void
+traceback_intern_funname(traceback_t *traceback)
+{
+	// operator tables here
+	frame_t* frame;
+	int i;
+	for (i=0; i < traceback->nframe; i++)
+	{
+		frame = &traceback->frames[i];
+		frame->clsname = get_obj_from_cache(frame->clsname);
+		frame->funname = get_obj_from_cache(frame->funname);
+	}
+}
+
+
 static traceback_t *
 traceback_new(void)
 {
@@ -528,6 +551,11 @@ traceback_new(void)
     traceback = tracemalloc_traceback;
     traceback->nframe = 0;
     traceback_get_frames(traceback);
+	
+	TABLES_LOCK();
+
+	traceback_intern_funname(traceback);
+
     if (traceback->nframe == 0)
         return &tracemalloc_empty_traceback;
     traceback->hash = traceback_hash(traceback);
@@ -610,7 +638,7 @@ tracemalloc_malloc(void *ctx, size_t size)
     if (ptr == NULL)
         return NULL;
 
-    TABLES_LOCK();
+    //TABLES_LOCK();
     if (tracemalloc_add_trace(ptr, size) < 0) {
         /* Failed to allocate a trace for the new memory block */
         TABLES_UNLOCK();
@@ -636,7 +664,7 @@ tracemalloc_realloc(void *ctx, void *ptr, size_t new_size)
 
         TABLES_LOCK();
         tracemalloc_remove_trace(ptr);
-
+		TABLES_UNLOCK();
         if (tracemalloc_add_trace(ptr2, new_size) < 0) {
             /* Memory allocation failed. The error cannot be reported to
                the caller, because realloc() may already have shrinked the
@@ -654,7 +682,7 @@ tracemalloc_realloc(void *ctx, void *ptr, size_t new_size)
     else {
         /* new allocation */
 
-        TABLES_LOCK();
+        //TABLES_LOCK();
         if (tracemalloc_add_trace(ptr2, new_size) < 0) {
             /* Failed to allocate a trace for the new memory block */
             TABLES_UNLOCK();
@@ -1137,7 +1165,7 @@ frame_to_pyobject(frame_t *frame)
 {
     PyObject *frame_obj, *lineno_obj;
 
-    frame_obj = PyTuple_New(3);
+    frame_obj = PyTuple_New(4);
     if (frame_obj == NULL)
         return NULL;
 
@@ -1146,11 +1174,15 @@ frame_to_pyobject(frame_t *frame)
     Py_INCREF(frame->filename);
     PyTuple_SET_ITEM(frame_obj, 0, frame->filename);
 
+	if (frame->clsname == NULL)
+		frame->clsname = Py_None;
+	Py_INCREF(frame->clsname);
+	PyTuple_SET_ITEM(frame_obj, 1, frame->clsname);
+	
+	if (frame->funname == NULL)
+		frame->funname = Py_None;
     Py_INCREF(frame->funname);
-	//printf("%s\n", PyString_AsString(frame->funname));
-
-    PyTuple_SET_ITEM(frame_obj, 1, frame->funname);
-    //PyTuple_SET_ITEM(frame_obj, 1, Py_None);
+    PyTuple_SET_ITEM(frame_obj, 2, frame->funname);
 
     assert(frame->lineno >= 0);
     lineno_obj = lineno_as_obj(frame->lineno);
@@ -1158,7 +1190,7 @@ frame_to_pyobject(frame_t *frame)
         Py_DECREF(frame_obj);
         return NULL;
     }
-    PyTuple_SET_ITEM(frame_obj, 2, lineno_obj);
+    PyTuple_SET_ITEM(frame_obj, 3, lineno_obj);
 
     return frame_obj;
 }
